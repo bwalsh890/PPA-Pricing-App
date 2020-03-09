@@ -1,0 +1,816 @@
+function onOpen(){
+  
+  var SS = SpreadsheetApp.getActiveSpreadsheet()
+  var sheetIn = SS.getSheetByName("Inputs")
+  
+  // Change Cells
+  sheetIn.getRange("D3").setBackground("#efefef")
+  sheetIn.getRange("D3").setFontColor("#000000")
+  sheetIn.getRange("D3").setValue("")
+  
+  var menuItems = [ 
+    {name: 'Calculate PPA Price', functionName: 'priceButton'},
+    {name: 'Generate Proposal', functionName: 'proposal'},
+    {name: 'Generate Term Sheet', functionName: 'showSidebar'},
+  ]
+    
+    SS.addMenu('Calculate/Export', menuItems);
+    }
+    
+  function priceButton(){
+    
+    var mo = Moment.load()
+    var lo = Lodash.load()
+    
+    // Locate spreadsheets
+    var SS = SpreadsheetApp.getActiveSpreadsheet()
+    var sheetIn = SS.getSheetByName("Inputs")
+    var sheetLedger = SS.getSheetByName("Ledger")
+    var sheetConfig = SS.getSheetByName("config")
+    var user = Session.getActiveUser()
+    
+    //initilise calculations
+    var ppaRate = []
+  
+  // Manipulation of input spreadsheet
+  sheetIn.getRange("D28:M32").clearContent()
+  
+  // Change Cells to red
+  sheetIn.getRange("D3").setBackground("#b7e1cd")
+  sheetIn.getRange("D3").setFontColor("#ffffff")
+  sheetIn.getRange("D3").setValue("Calculating...")
+  
+  // Find the number of inputs
+  var rowInputs = sheetIn.getRange(8,4,1,30).getValues()
+  
+  var temp = lo.compact(rowInputs[0])
+  var noEntries = temp.length
+  
+  // Partner
+  var partner = sheetConfig.getRange("B1").getValue()
+  var user = Session.getActiveUser().getEmail()
+  
+  // Loop over no input sites
+  for (j = 0; j < noEntries; j++){
+    
+    // Get Site inputs
+    var inputs = sheetIn.getRange(8,j+4,13,1).getValues()
+    var lgc = sheetConfig.getRange("B6").getValue()
+    var manIRR = sheetIn.getRange(24,j+4,1,1).getValue()
+    
+    inputs = lo.chunk(lo.flattenDeep([inputs,manIRR,lgc]))
+   
+    // Find the PPA Rates from Library
+    var rates = findRate(inputs)
+    
+    // Export to sheet
+    sheetIn.getRange(28,4+j,5,1).setValues(lo.chunk(rates))
+    
+    // Export to ledger
+    var lastRow = sheetLedger.getLastRow()+1
+    var timeD = new Date()
+    var quoteNo = sheetLedger.getRange(lastRow-1,1).getValue()
+    var values1 = col2row(inputs)
+    values1 = lo.flatten([quoteNo+1,partner,user,timeD,values1[0],rates])
+    sheetLedger.getRange(lastRow,1,1,values1.length).setValues([values1])
+  }
+  
+  // Change Cells back
+  sheetIn.getRange("D3").setBackground("#efefef")
+  sheetIn.getRange("D3").setFontColor("#000000")
+  sheetIn.getRange("D3").setValue("")
+}
+
+function proposal(){
+  var lo = Lodash.load()
+  var ss = SpreadsheetApp.getActive()
+  var sheet = ss.getSheets()[0]
+  var sheet2 = ss.getSheets()[1]
+  var sheetConfig = ss.getSheetByName("config")
+  
+  // Change Cells
+  sheet.getRange("D3").setBackground("#b7e1cd")
+  sheet.getRange("D3").setFontColor("#ffffff")
+  sheet.getRange("D3").setValue("Building...")
+  
+  // Variables
+  var dateT = Utilities.formatDate(new Date(), "GMT+9", "dd MMMM yyyy")
+  
+  // Copy Slide Deck
+  var company = sheet.getRange("E5").getValue()
+  var nameDeck = "Solar Bay PPA Proposal" + " - " + company
+  var fileID = sheetConfig.getRange("B3").getValue()
+  var folderID = sheetConfig.getRange("B5").getValue()
+  
+  
+  // Create new folder
+  var newFolder = DriveApp.getFolderById(folderID).createFolder(company)
+  var newFoldId = newFolder.getId()
+  var destFold = DriveApp.getFolderById(newFoldId)
+  
+  var deckCopy = DriveApp.getFileById(fileID).makeCopy(destFold)
+  deckCopy.setName(nameDeck)
+  var copyDeck = deckCopy.getId()
+  var newDeck = SlidesApp.openById(copyDeck)
+  
+  // Replace Front Page Text
+  newDeck.replaceAllText("{{company}}", company, false)
+  newDeck.replaceAllText("{{dateT}}", dateT, false)
+  
+  // Initialise 
+  var site = []
+  var pvSize = []
+  var pvOutput = []
+  var rate10 = []
+  var rate12 = []
+  var rate15 = []
+  var rate20 = []
+  var escl = []
+  var certs = []
+  var colN = []
+  
+  var sites = sheet.getRange(8,4,1,30).getValues()
+  var numEntries = lo.compact(sites[0]).length
+  var quoteNum = []
+  
+  // Get site information for slides
+  for (var i = 0; i < numEntries; i++){
+    
+    if(i!=0){newDeck.getSlides()[2].duplicate()}
+    
+    colN = i + 4
+    
+    site.push(sheet.getRange(8,colN).getValue())
+    pvSize.push(sheet.getRange(12,colN).getValue())
+    pvOutput.push(sheet.getRange(16,colN).getValue())
+    escl.push(sheet.getRange(17,colN).getValue())
+    rate10.push(sheet.getRange(29,colN).getValue())
+    rate12.push(sheet.getRange(30,colN).getValue())
+    rate15.push(sheet.getRange(31,colN).getValue())
+    rate20.push(sheet.getRange(32,colN).getValue())
+    certs.push(sheet.getRange(54,colN).getValue())
+    quoteNum.push(sheet2.getRange(sheet2.getLastRow()-numEntries+i+1,1).getValue())
+  }
+  
+  
+  for(var j=0; j<numEntries;j++){
+    
+    var slideEditing = newDeck.getSlides()[j+2]
+    
+    slideEditing.replaceAllText("{{site}}", site[j], true)
+    slideEditing.replaceAllText("{{pvSize}}", formatNumberCom(pvSize[j]), true)
+    slideEditing.replaceAllText("{{pvOutput}}",formatNumberCom(pvOutput[j]), true)
+    slideEditing.replaceAllText("{{Escl}}", escl[j], true)
+    slideEditing.replaceAllText("{{rate10}}", formatRound(rate10[j],3), true)
+    slideEditing.replaceAllText("{{rate12}}", formatRound(rate12[j],3), true)
+    slideEditing.replaceAllText("{{rate15}}", formatRound(rate15[j],3), true)
+    slideEditing.replaceAllText("{{rate20}}", formatRound(rate20[j],3), true)
+    slideEditing.replaceAllText("{{certificates}}",certs[j], true)  
+    slideEditing.replaceAllText("{{quoteNo}}",quoteNum[j], true)  
+  }
+  
+  sheet.getRange("D3").setBackground("#efefef")
+  sheet.getRange("D3").setFontColor("#000000")
+  sheet.getRange("D3").setValue("")
+  
+  newDeck.saveAndClose()
+  var blob = DriveApp.getFileById(newDeck.getId()).getBlob();
+  var pdf = DriveApp.createFile(blob);
+  destFold.addFile(pdf)
+  
+  sheet.getRange("D3").setBackground("#efefef")
+  sheet.getRange("D3").setFontColor("#000000")
+  sheet.getRange("D3").setValue("")
+}
+
+
+function termSheet(e_SH,e_name,e_abn,e_address){
+  var lo = Lodash.load()
+  var mo = Moment.load()
+  
+  var ss = SpreadsheetApp.getActive()
+  var sheet = ss.getSheets()[0]
+  var sheet2 = ss.getSheets()[1]
+  var sheetConfig = ss.getSheetByName("config")
+  var lock = LockService.getScriptLock();
+  
+  // Change Cells
+  sheet.getRange("D3").setBackground("#b7e1cd")
+  sheet.getRange("D3").setFontColor("#ffffff")
+  sheet.getRange("D3").setValue("Editing...")
+  
+  // Variables
+  var dateT = Utilities.formatDate(new Date(), "GMT+9", "dd MMMM yyyy")
+  
+  // Copy Term Sheet Document
+  var company = sheet.getRange("E5").getValue()
+  var nameDoc = "Solar Bay Term Sheet" + " - " + company
+  
+  var fileID = sheetConfig.getRange("B4").getValue()
+  try{
+  var dFold = DriveApp.getFoldersByName(company).next().getId()
+  }
+  catch(e){
+  if(dFold != null){
+  var destFold = DriveApp.getFolderById(dFold)
+  }
+  else{var destFold = DriveApp.getFolderById('15fwg5ps_EtZmlBgRuAx67Qce9bTxc1S9')}
+  }
+  Logger.log(destFold)
+  
+  var docCopy = DriveApp.getFileById(fileID).makeCopy(destFold)
+  docCopy.setName(nameDoc)
+  var copyDoc = docCopy.getId()
+  var newDoc = DocumentApp.openById(copyDoc)
+  var body = newDoc.getBody()
+  var footer = newDoc.getFooter()
+  
+  var month = mo().format('MMMM')
+  var year = mo().format('YYYY')
+  
+  // Replace body Text
+  body.replaceText("{{ownerSH}}", e_SH)
+  body.replaceText("{{date}}", dateT)
+  body.replaceText("{{entity}}", e_name)
+  body.replaceText("{{abn}}", e_abn)
+  body.replaceText("{{regAddress}}", e_address)
+  body.replaceText("{{month}}",month)
+  body.replaceText("{{year}}",year)
+  
+  // Replace footer Text
+  footer.replaceText("{{date}}", dateT)
+  footer.replaceText("{{ownerSH}}", e_SH)
+  
+  // Initialise 
+  var site = []
+  var pvSize = []
+  var pvOutput = []
+  var rate10 = []
+  var rate12 = []
+  var rate15 = []
+  var rate20 = []
+  var address = []
+  var colN = []
+  var sumPV = []
+  var sumkWh = []
+  
+  var sites = sheet.getRange(8,4,1,30).getValues()
+  var numEntries = lo.compact(sites[0]).length
+  var quoteNum = []
+  
+  // Get site information for table
+  for (var i = 0; i < numEntries; i++){
+    
+    colN = i + 4
+    
+    site.push(sheet.getRange(8,colN).getValue())
+    pvSize.push(parseInt(sheet.getRange(12,colN).getValue()))
+    pvOutput.push(sheet.getRange(16,colN).getValue())
+    address.push(sheet.getRange(24,colN).getValue())
+    quoteNum.push(sheet2.getRange(sheet2.getLastRow()-numEntries+i+1,1).getValue())
+  }
+  
+  // Get tables
+  var docTable = body.getTables()[4]
+  
+  // Put things into cells
+  var cells = [];
+  
+  var style = {}
+  style[DocumentApp.Attribute.BOLD] = false
+  
+  
+  
+  for (k = 0; k < numEntries; k++){
+    cells[k] = [
+      [quoteNum[k]],
+      [site[k]],
+      [pvSize[k]],
+      [address[k]]
+    ];
+  }
+  
+  for (i = 0; i < numEntries; i++){
+    var tr = docTable.appendTableRow()
+    
+    for (j = 0; j < 4; j++){
+      var td = tr.appendTableCell(cells[i][j])
+      td.setAttributes(style)
+    }
+    
+    
+    
+    // newDoc.saveAndClose()
+    //var blob = DriveApp.getFileById(newDoc.getId()).getBlob();
+    //var pdf = DriveApp.createFile(blob);
+    // destFold.addFile(pdf)
+  }
+}
+
+function formatNumberCom(num) {
+  return num.toString().replace(/(\d)(?=(\d{3})+(?!\d))/g, '$1,')
+}
+
+function formatRound(x, n){
+  return x.toFixed(n)
+}
+function col2row(column) {
+  return [column.map(function(row) {return row[0];})];
+}
+
+function showSidebar() {
+  var html = HtmlService.createHtmlOutputFromFile('SideBar')
+  .setTitle('Settings Sidebar')
+  .setWidth(300)
+  SpreadsheetApp.getUi().showSidebar(html);
+}
+
+function findRate(inputs){
+  var lo = Lodash.load()
+  var ppaLengths = [5,10,12,15,20]
+  var creditBins = ['Class 1','Class 2','Class 3','Class 4']
+  var returnTargets = [0.13,0.11,0.03,0.07]
+  var endOfTermSelection = ['$0 Buy Out','Make Good']
+  
+  //Initialise
+  var ppaLength = []
+  var ppaRate = []
+  var rates = []
+  var calcIRR = []
+  var cashflow = []
+  var rates = []
+  var temp = []
+    
+  //Extract Inputs
+  var label = inputs[0][0]
+  var creditBinIn = inputs[1][0]
+  var state = inputs[2][0]
+  var endOfTerm = inputs[3][0]
+  var pvSize = inputs[4][0]
+  var batterySize = inputs[5][0]
+  var systemCost = inputs[6][0]
+  var upFrontCost = inputs[7][0]
+  var pvOutput = inputs[8][0]
+  var ppaEscl = inputs[9][0]
+  var lgcTo = inputs[10][0]
+  var maintenance = inputs[11][0]
+  var maintEscl = inputs[12][0]
+  var manIRR = inputs[13][0]
+  var lgcPrice = inputs[14][0]
+  
+    
+  // Internal calculations single
+  if(manIRR>0){var targetIRR = manIRR}
+  else{ var targetIRR = returnTargets[creditBins.indexOf(creditBinIn)]}
+    
+  var investmentCost = systemCost + upFrontCost
+    
+  // Loop over each PPA Length
+  for (i = 0;i < 5; i++){
+      
+    // Set PPA Length
+    ppaLength = ppaLengths[i]
+      
+    // Initialise PPA Rate and Calc IRR
+    ppaRate = 0
+    calcIRR = 0
+      
+    // Increase PPA Price by 5c each loop
+    while(calcIRR < targetIRR || isNaN(calcIRR)){
+        
+      ppaRate = ppaRate + 0.05;
+      temp = cashflowCalc(ppaRate,ppaLength,inputs)
+      cashflow = temp[0]
+        
+      calcIRR = Finance.prototype.IRR(cashflow)/100
+        
+      var error = Math.abs(calcIRR - targetIRR)
+        
+    }
+      
+    // Decrease PPA Price by 1c per loop
+    while(calcIRR > targetIRR){
+        
+      ppaRate = ppaRate - 0.01;
+      temp = cashflowCalc(ppaRate,ppaLength,inputs)
+      cashflow = temp[0]
+        
+      calcIRR = Finance.prototype.IRR(cashflow)/100
+        
+      error = Math.abs(calcIRR - targetIRR)
+        
+    }
+      
+    // Decrease PPA Price by 0.5c per loop
+    while(calcIRR < targetIRR){ 
+        
+      ppaRate = ppaRate + 0.002
+      temp = cashflowCalc(ppaRate,ppaLength,inputs)
+      cashflow = temp[0]
+        
+      calcIRR = Finance.prototype.IRR(cashflow)/100
+        
+      error = Math.abs(calcIRR - targetIRR)
+        
+    }
+      
+    // Decrease PPA Price by 0.5c per loop
+    if(calcIRR > targetIRR && error > 0.001){ 
+        
+      ppaRate = ppaRate - 0.001
+      temp = cashflowCalc(ppaRate,ppaLength,inputs)
+      cashflow = temp[0]
+        
+      calcIRR = Finance.prototype.IRR(cashflow)/100
+        
+      error = Math.abs(calcIRR - targetIRR) 
+    }
+    rates.push(lo.round(ppaRate,3))
+  }
+  return rates
+}
+  
+function cashflowCalc(ppaRate,ppaLength,inputs){
+//Creates a cashflow  
+    
+  var lo = Lodash.load()
+  var i = 0
+
+  //Extract Inputs
+  var label = inputs[0][0]
+  var creditBinIn = inputs[1][0]
+  var state = inputs[2][0]
+  var endOfTerm = inputs[3][0]
+  var pvSize = inputs[4][0]
+  var batterySize = inputs[5][0]
+  var systemCost = inputs[6][0]
+  var upFrontCost = inputs[7][0]
+  var pvOutput = inputs[8][0]
+  var ppaEscl = inputs[9][0]
+  var lgcTo = inputs[10][0]
+  var maintenance = inputs[11][0]
+  var maintEscl = inputs[12][0]
+  var manIRR = inputs[13][0]
+  var lgcPrice = inputs[14][0]
+  
+  // Hard code
+  var deg1 = 0.025
+  var deg2 = 0.008
+  var insurance = 0.003
+  var monitoring = 500
+  var buyOutPremium = 1.3
+  var replaceCost = pvSize*100
+  var replaceYear = 11
+    
+  // Calculations
+  var investmentCost = systemCost+upFrontCost
+  
+  // Initialise
+  var ppaLengths = [5,10,12,15,20]
+  var esclOp = ['CPI','Flat','Fixed 2%','Fixed 1%']
+  var esclSelc = ['1.025','1','1.02','1.01']
+  var cpi = 0.025
+  var ppaE = esclSelc[esclOp.indexOf(ppaEscl)]
+  var ppaSchedule = []
+  var pvOutputSchedule = []
+  var year = []
+  var expenses = []
+  var revenue = []
+  var cashflow = []
+    
+  var capex = systemCost*buyOutPremium
+    
+  if(pvSize > 100 && lgcTo == "Solar Bay"){ 
+    var lgcs = lgcPrice * pvOutput/1000 * 5
+  }
+    else{var lgcs = 0}
+    
+  // Create cashflow
+  // Year 0 first
+  year[0] = 0
+  ppaSchedule[0] = 0
+  pvOutputSchedule[0] = 0
+  revenue[0] = 0
+  expenses[0] = 0
+  cashflow[0] = -1*investmentCost
+    
+  // Year 1 to PPA Length
+  for (i = 1; i < ppaLength+1; i++){
+      
+    // Year - 0,1,2,3...20
+    year[i] = i
+    // PPA - 0.03,0.033,0.036,..... [ PPA rate*(1.025)^year ]
+    ppaSchedule[i] = lo.round(ppaRate * Math.pow(ppaE,i-1),3)
+    // pvout - each year reduces by values 100,97.5%,96.2%....81% ]
+      if(i == 1){pvOutputSchedule[i] = pvOutput}
+      if(i == 2){pvOutputSchedule[i] = pvOutput*(1-deg1)}
+      if(i > 2){pvOutputSchedule[i] = pvOutput*Math.pow((1-deg2),(i-2))}
+      // revenue = ppa rate x output 
+        revenue[i] = ppaSchedule[i] * pvOutputSchedule[i]
+      // Add LGCS
+      if(year[i] == 1){
+        revenue[i] = revenue[i] + lgcs
+      }
+      //if(ppaLength == 20 && ppaRate == 0.12){sheetIn.appendRow([monitoring,insurance,pvSize,maintenance])}
+      
+      // expenses = (sum of expenses) x (1.025)^year
+      expenses[i] = (monitoring + insurance*investmentCost + maintenance) * Math.pow((1+cpi),(i-1))
+      // Add Replacement costs
+      if(year[i] == replaceYear){expenses[i] = expenses[i] + replaceCost}
+      // Add Make Good
+      if(year[i] == ppaLength && endOfTerm == "Make Good"){expenses[i] = expenses[i] + 20*pvSize}
+      // Less OPEX Year 1
+      if(year[i] == 1){expenses[i] = expenses[i] - maintenance}
+      
+      // cashflow = revenue - expenses for each year
+        cashflow[i] = Math.round(revenue[i]) - Math.round(expenses[i])
+    }
+    
+    return [cashflow,ppaSchedule,pvOutputSchedule,revenue,expenses]
+  }
+  
+function formatNumberCom(num) {
+  return num.toString().replace(/(\d)(?=(\d{3})+(?!\d))/g, '$1,')
+}
+
+function formatRound(x, n){
+  return x.toFixed(n)
+}
+
+//Finance.js
+//For more information, visit http://financejs.org
+//Copyright 2014 - 2015 Essam Al Joubori, MIT license
+
+// Instantiate a Finance class
+var Finance = function() {};
+
+// Present Value (PV)
+Finance.prototype.PV = function (rate, cf1, numOfPeriod) {
+  numOfPeriod = typeof numOfPeriod !== 'undefined' ? numOfPeriod : 1;
+  var rate = rate/100, pv;
+  pv = cf1 / Math.pow((1 + rate),numOfPeriod);
+  return Math.round(pv * 100) / 100;
+};
+
+// Future Value (FV)
+Finance.prototype.FV = function (rate, cf0, numOfPeriod) {
+  var rate = rate/100, fv;
+  fv = cf0 * Math.pow((1 + rate), numOfPeriod);
+  return Math.round(fv * 100) / 100;
+};
+
+// Net Present Value (NPV)
+Finance.prototype.NPV = function (rate) {
+  var rate = rate/100, npv = arguments[1];
+  for (var i = 2; i < arguments.length; i++) {
+    npv +=(arguments[i] / Math.pow((1 + rate), i - 1));
+  }
+  return Math.round(npv * 100) / 100;
+};
+
+// seekZero seeks the zero point of the function fn(x), accurate to within x \pm 0.01. fn(x) must be decreasing with x.
+function seekZero(fn) {
+  var x = 1;
+  while (fn(x) > 0) {
+    x += 1;
+  }
+  while (fn(x) < 0) {
+    x -= 0.01
+  }
+  return x + 0.01;
+}
+
+// Internal Rate of Return (IRR)
+Finance.prototype.IRR = function(cfs) {
+  var depth = 50000000;
+  var args = cfs.cashFlow;
+  var numberOfTries = 1;
+  args = cfs
+  // Cash flow values must contain at least one positive value and one negative value
+  var positive, negative;
+  Array.prototype.slice.call(args).forEach(function (value) {
+    if (value > 0) positive = true;
+    if (value < 0) negative = true;
+  })
+  if (!positive || !negative) throw new Error('IRR requires at least one positive value and one negative value');
+  function npv(rate) {
+    numberOfTries++;
+    if (numberOfTries > depth) {
+      throw new Error('IRR can\'t find a result');
+    }
+    var rrate = (1 + rate/100);
+    var npv = args[0];
+    for (var i = 1; i < args.length; i++) {
+      npv += (args[i] / Math.pow(rrate, i));
+    }
+    return npv;
+  }
+  return Math.round(seekZero(npv) * 100) / 100;
+};
+
+// Payback Period (PP)
+Finance.prototype.PP = function(numOfPeriods, cfs) {
+  // for even cash flows
+  if (numOfPeriods === 0) {
+    return Math.abs(arguments[1]) / arguments[2];
+  }
+  // for uneven cash flows
+  var cumulativeCashFlow = arguments[1];
+  var yearsCounter = 1;
+  for (i = 2; i < arguments.length; i++) {
+    cumulativeCashFlow += arguments[i];
+    if (cumulativeCashFlow > 0) {
+      yearsCounter += (cumulativeCashFlow - arguments[i]) / arguments[i];
+      return yearsCounter;
+    } else {
+      yearsCounter++;
+    }
+  }
+};
+
+// Return on Investment (ROI)
+Finance.prototype.ROI = function(cf0, earnings) {
+  var roi = (earnings - Math.abs(cf0)) / Math.abs(cf0) * 100;
+  return Math.round(roi * 100) / 100;
+};
+
+// Amortization
+Finance.prototype.AM = function (principal, rate, period, yearOrMonth, payAtBeginning) {
+  var numerator, denominator, am;
+  var ratePerPeriod = rate / 12 / 100;
+
+  // for inputs in years
+  if (!yearOrMonth) {
+    numerator = buildNumerator(period * 12);
+    denominator = Math.pow((1 + ratePerPeriod), period * 12) - 1;
+
+    // for inputs in months
+  } else if (yearOrMonth === 1) {
+    numerator = buildNumerator(period)
+    denominator = Math.pow((1 + ratePerPeriod), period) - 1;
+
+  } else {
+    console.log('not defined');
+  }
+  am = principal * (numerator / denominator);
+  return Math.round(am * 100) / 100;
+
+  function buildNumerator(numInterestAccruals) {
+    if (payAtBeginning) {
+      //if payments are made in the beginning of the period, then interest shouldn't be calculated for first period
+      numInterestAccruals -= 1;
+    }
+    return ratePerPeriod * Math.pow((1 + ratePerPeriod), numInterestAccruals);
+  }
+};
+
+// Profitability Index (PI)
+Finance.prototype.PI = function(rate, cfs) {
+  var totalOfPVs = 0, PI;
+  for (var i = 2; i < arguments.length; i++) {
+    var discountFactor;
+    // calculate discount factor
+    discountFactor = 1 / Math.pow((1 + rate/100), (i - 1));
+    totalOfPVs += arguments[i] * discountFactor;
+  }
+  PI = totalOfPVs/Math.abs(arguments[1]);
+  return Math.round(PI * 100) / 100;
+};
+
+// Discount Factor (DF)
+Finance.prototype.DF = function(rate, numOfPeriods) {
+  var dfs = [], discountFactor;
+  for (var i = 1; i < numOfPeriods; i++) {
+    discountFactor = 1 / Math.pow((1 + rate/100), (i - 1));
+    roundedDiscountFactor = Math.ceil(discountFactor * 1000)/1000;
+    dfs.push(roundedDiscountFactor);
+  }
+  return dfs;
+};
+
+// Compound Interest (CI)
+Finance.prototype.CI = function(rate, numOfCompoundings, principal, numOfPeriods) {
+  var CI = principal * Math.pow((1 + ((rate/100)/ numOfCompoundings)), numOfCompoundings * numOfPeriods);
+  return Math.round(CI * 100) / 100;
+};
+
+// Compound Annual Growth Rate (CAGR)
+Finance.prototype.CAGR = function(beginningValue, endingValue, numOfPeriods) {
+  var CAGR = Math.pow((endingValue / beginningValue), 1 / numOfPeriods) - 1;
+  return Math.round(CAGR * 10000) / 100;
+};
+
+// Leverage Ratio (LR)
+Finance.prototype.LR = function(totalLiabilities, totalDebts, totalIncome) {
+  return (totalLiabilities  + totalDebts) / totalIncome;
+};
+
+// Rule of 72
+Finance.prototype.R72 = function(rate) {
+  return 72 / rate;
+};
+
+// Weighted Average Cost of Capital (WACC)
+Finance.prototype.WACC = function(marketValueOfEquity, marketValueOfDebt, costOfEquity, costOfDebt, taxRate) {
+  var E = marketValueOfEquity;
+  var D = marketValueOfDebt;
+  var V =  marketValueOfEquity + marketValueOfDebt;
+  var Re = costOfEquity;
+  var Rd = costOfDebt;
+  var T = taxRate;
+
+  var WACC = ((E / V) * Re/100) + (((D / V) * Rd/100) * (1 - T/100));
+  return Math.round(WACC * 1000) / 10;
+};
+
+/**
+ * Loan Payment calculation.
+ * @param rate Rate of interest, 100-based (15% = 15), per period
+ * @param principal Loan amount
+ * @param numOfPayments
+ * @see http://www.financeformulas.net/Loan_Payment_Formula.html
+ */
+Finance.prototype.PMT = function (rate, numOfPayments, principal) {
+  var rate = rate/100, pmt;
+  pmt = -(principal * rate) / (1 - Math.pow(1 + rate, -numOfPayments))
+  return Math.round(pmt * 100) / 100;
+};
+
+// IAR calculates the Inflation-adjusted return
+Finance.prototype.IAR = function(investmentReturn, inflationRate){
+  return 100 * (((1 + investmentReturn) / (1 + inflationRate)) - 1);
+}
+
+// XIRR - IRR for irregular intervals
+Finance.prototype.XIRR = function(cfs, dts, guess) {
+  if (cfs.length != dts.length) throw new Error('Number of cash flows and dates should match');
+
+  var positive, negative;
+  Array.prototype.slice.call(cfs).forEach(function (value) {
+    if (value > 0) positive = true;
+    if (value < 0) negative = true;
+  });
+
+  if (!positive || !negative) throw new Error('XIRR requires at least one positive value and one negative value');
+
+
+  guess = !!guess ? guess : 0;
+
+  var limit = 100; //loop limit
+  var guess_last;
+  var durs = [];
+
+  durs.push(0);
+
+  //Create Array of durations from First date
+  for(var i = 1; i < dts.length; i++) {
+    durs.push(durYear(dts[0], dts[i]));
+  }
+
+  do {
+    guess_last = guess;
+    guess = guess_last - sumEq(cfs, durs, guess_last);
+    limit--;
+
+  }while(guess_last.toFixed(5) != guess.toFixed(5) && limit > 0);
+
+  var xirr = guess_last.toFixed(5) != guess.toFixed(5) ? null : guess*100;
+
+  return Math.round(xirr * 100) / 100;
+}
+
+//CAPM calculates expected return of an asset.
+Finance.prototype.CAPM = function (rf, beta, emr, err) {
+  var ans = rf/100 + beta * (emr/100 - rf/100);
+  return ans;
+}
+
+//Returns the Value of stock with dividend growing at a 
+//constant growth rate to perpetuity.
+Finance.prototype.stockPV = function (g, ke, D0) {
+  var valueOfStock = (D0 * (1 + g/100))/((ke/100) - (g/100))
+  return Math.round(valueOfStock)
+}
+
+//Returns Sum of f(x)/f'(x)
+function sumEq(cfs, durs, guess) {
+  var sum_fx = 0;
+  var sum_fdx = 0;
+  for (var i = 0; i < cfs.length; i++) {
+    sum_fx = sum_fx + (cfs[i] / Math.pow(1 + guess, durs[i]));
+  }
+  for ( i = 0; i < cfs.length; i++) {
+    sum_fdx = sum_fdx + (-cfs[i] * durs[i] * Math.pow(1 + guess, -1 - durs[i]));
+  }
+  return sum_fx / sum_fdx;
+}
+
+//Returns duration in years between two dates
+function durYear(first, last) {
+  return (Math.abs(last.getTime() - first.getTime()) / (1000 * 3600 * 24 * 365));
+}
+
+if (typeof exports !== 'undefined' && typeof module !== 'undefined' && module.exports) {
+  module.exports = Finance;
+  module.exports.Finance = Finance;
+}
