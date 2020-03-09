@@ -1,0 +1,960 @@
+ properties (Access = private)
+        solarTableG % Description
+        irrOutputG % Description
+        ppaRateOutG % Description
+        parametersG % Description
+        dcfCashFlowG % Description
+        MDataPath %
+        HDataPath %
+        DCFexport % table for exporting csv/xlsx file
+        energyRatesG % 5x4 cell of energy rates [Retail,p,s,o,f;Network,p,s,o,f;Tariff,p,s,o,[];misc,[])
+        tariffTreeNodeData % Tariff Data from tree selection
+        solarArrayG % Grid Usage, Solar Output, Net consumption, Offset, Export
+        systemOutValuesG % System performance values for dashboard
+        ppaOutValuesG % PPA output values for dashboard
+        capexOutValuesG % CAPEX output values for  dashboard
+        billTableG % Energy bill table
+        demandTableG % Demand calculation table
+        yFitG % 
+        variablesG = ones([5,1]); % IRR input, Install Rate, System Size H, System Size A,PPA Length 
+        inputsG = cell([8 1]); % 1 cdpath, 2 Postcode, 3 commission, 4 Rental, 5 rental index, 6 generation switch, 7 stc switch, 8 meter data checkbox
+    end
+    
+    properties (Access = public)
+        network %
+        retailer %
+        tariff %
+    end
+    
+    
+    methods (Access = private)
+        
+        function [subsidy, certTable] = findSubsidy(app,subsidyType,STC_price,LGC_price,pvSizeEditfield)
+            % This function will calculate the subsidy and the irradiance rating
+            
+            systemSize = app.variablesG(4);
+            
+            % Calculate Subsidy Value if STC
+            certTable = readtable('certTable.txt');
+            postcode = app.postcodeEditField.Value;
+            % Find the irradiance zone of the PV system
+            certZone = certTable(postcode>=certTable.Postcode1 & postcode<=certTable.Postcode2,3);
+            
+            % Run subsidy function
+            % Number of years of STC hedge
+            nYears = 2031 - year(datetime('now'));
+            
+            % Certificate multiple for Irradiance zones by postcode
+            certRatingTable = [1, 1.622; 2,1.536; 3,1.382; 4,1.185];
+            certRating = certRatingTable(certRatingTable(:,1) == certZone{1,1},2);
+            if subsidyType == "STC"
+                % Number of certificates = install size * Zone Rating * Number of years
+                nCerts = systemSize * certRating * nYears ;
+                % STC Price = input
+                pCerts = STC_price;
+                
+            else
+                % for LGC Number of certificates = System size * Rating * 5 years
+                nCerts = systemSize * certRating * 5;
+                % LGC price = INPUT
+                pCerts = LGC_price;
+                
+            end
+            
+            subsidy = nCerts * pCerts;
+            
+        end
+        
+        %%%% This function calculates the Subsidy value
+        
+        function dcfCashFlow = IRRfitFuc(app)
+            
+            %% GUI INPUTS
+            
+            % Starting IRRin
+            irrIn = app.variablesG(1);
+            
+            % GUI inputs
+            installRate = app.variablesG(2);
+            systemSize = app.variablesG(4);
+            roofRental = app.roofRentalEditField.Value;
+            app.inputsG{4} = roofRental;
+            addExpensesOn = app.expensesOngoingEditField.Value;
+            addExpensesUpf = app.expensesUpfrontEditField.Value;
+            STC_price = app.STCPriceEditField.Value;
+            LGC_price = app.LGCPriceEditField.Value;
+            subsidyType = app.subsidySwitch.Value;
+            app.inputsG{7} = subsidyType;
+            ppaLength = app.variablesG(5);
+            
+            % Parameters
+            
+            parameters = app.parametersG.Data;
+            % ---
+            monitoring = parameters{1,2};
+            maintenance = parameters{2,2};
+            cpi = parameters{4,2};
+            invertReplaceCost = parameters{5,2};
+            Y1deg = parameters{6,2};
+            Y2deg = parameters{7,2};
+            soilingRate = parameters{8,2};
+            feedInTariff = parameters{9,2};
+            
+            % Calculate the subsidy amount
+            [subsidy_value, ~] = findSubsidy(app,subsidyType,STC_price,LGC_price,systemSize);
+            
+            
+            %% ----------------------------------
+            
+            % Calculate cost of the install
+            costPVPreSub = installRate * systemSize * 1000;
+            costPV = costPVPreSub - subsidy_value;
+            
+            % Calculate insurance amount
+            insurance = parameters{3,2} * costPV;
+            
+            % Calculate commission
+            C = str2double(app.CommissionDropDown.Value);
+            app.inputsG{3} = C;
+            
+            switch C
+                
+                case 1
+                    comms = 0;
+                    cPWC = 0;
+                case 2
+                    comms = min(10000 + systemSize*20, 0.04*costPV);
+                    cPWC = 0;
+                case 3
+                    comms = 0;
+                    cPWC = 1;
+            end
+            
+            
+            % Create solarTable function
+            solarTable = buildSolarTable(app);
+            app.solarTableG.Data = solarTable;
+            
+            % Grid, Solar Gen, Net grid, Offset, Export
+            solarArray = app.solarArrayG.Data;
+            
+            % Extract relevant info from solar array
+            site_consumption = sum(solarArray(:,1));
+            solar_generation = sum(solarArray(:,2));
+            solar_consumption = sum(solarArray(:,4));
+            solar_export = sum(solarArray(:,5));
+            VWAP = sum(solarTable{:,22});
+            
+            % BRUTE FORCE PPA price discovery
+            
+            % Iterate accross possible PPA rates
+            % Find IRR of each rate
+            % Choos PPA Rate to fit IRR in value
+            % Run new Cashflow from PPA rate
+            
+            %% INPUTS
+            % Capital expense of system
+            capExpenses = (costPV+addExpensesUpf+comms)*-1;
+            
+            app.inputsG{5} = app.rentalIndex.Value;
+            
+            % Ongoing expenses due to operation
+            if app.rentalIndex.Value == true
+                ongoingExpEsc = insurance + maintenance + invertReplaceCost + roofRental;
+                flatExpenses = monitoring + addExpensesOn;
+            else
+                ongoingExpEsc = insurance + maintenance + invertReplaceCost;
+                flatExpenses = monitoring + addExpensesOn + roofRental;
+                
+            end
+            
+            
+            % Allocate loops and ppa length for Cashflows
+            revenue = (0:ppaLength)';
+            expenses = (0:ppaLength)';
+            year = (0:ppaLength)';
+            systemOutput = (0:ppaLength)';
+            solarConsumption = (0:ppaLength)';
+            solarExport = (0:ppaLength)';
+            ppaRateEsc = (0:ppaLength)';
+            
+            
+            % Allocate PPA Rates to loop over
+            ppaRates = (0.01:0.001:0.50)';
+            l = length(ppaRates);
+            irrCalc = (1:l)';
+            
+            for i = 1:l
+                % Set ppa rate
+                ppa_Rate = ppaRates(i);
+                % Calculations year 1-2
+                systemOutput(1) = 0;
+                systemOutput(2) = solar_generation;
+                systemOutput(3) = solar_generation*(1-Y1deg)*(1-soilingRate);
+                solarConsumption(1) = 0;
+                
+                app.inputsG{6} = app.GenSwitch.Value;
+                
+                if app.GenSwitch.Value == "Consumption"
+                    solarConsumption(2) = solar_consumption;
+                    hh = 1;
+                else
+                    solarConsumption(2) = solar_generation;
+                    hh = 0;
+                end
+                
+                solarConsumption(3) = min(solarConsumption(2),systemOutput(3));
+                solarExport(1) = 0;
+                solarExport(2) = solar_export;
+                solarExport(3) = max(0,systemOutput(3) - solarConsumption(3));
+                ppaRateEsc(1) = 0;
+                ppaRateEsc(2) = ppa_Rate;
+                ppaRateEsc(3) = ppaRateEsc(2)*(1+cpi);
+                revenue(1) = 0;
+                revenue(2) = ppaRateEsc(2)*solarConsumption(2) + solarExport(2)*feedInTariff*hh;
+                revenue(3) = ppaRateEsc(3)*solarConsumption(3) + solarExport(3)*feedInTariff*hh;
+                expenses(1) = -1*capExpenses;
+                expenses(2) = ongoingExpEsc + flatExpenses + 0.2*revenue(2)*cPWC;
+                expenses(3) = ongoingExpEsc*(1+cpi) + flatExpenses + 0.2*revenue(3)*cPWC;
+                
+                % Calculate years 3-end
+                for j = 4:ppaLength+1
+                    systemOutput(j) = systemOutput(j-1)*(1-Y2deg)*(1-soilingRate);
+                    solarConsumption(j) = min(solarConsumption(j-1),systemOutput(j));
+                    solarExport(j) = max(0,systemOutput(j) - solarConsumption(j));
+                    ppaRateEsc(j) = ppaRateEsc(j-1)*(1+cpi);
+                    revenue(j) = ppaRateEsc(j) * solarConsumption(j) + solarExport(j)*feedInTariff*hh;
+                    expenses(j) = ongoingExpEsc*(1+cpi)^(j-1) + flatExpenses + 0.2*revenue(j)*cPWC;
+                end
+                
+                
+                cashflow = revenue - expenses; % Cashflow
+                
+                % Calcualte IRR
+                irrCalc(i) = irr(cashflow);
+                irrCalc(isnan(irrCalc)) = 0;
+                irrCalc(irrCalc < 0) = 0;
+                
+            end
+            
+            yFit = [irrCalc,ppaRates];  % yFit is irr for each ppa rate tested
+            app.yFitG.Data = yFit;
+            
+            % Calculate irrF
+            % Initialize final values
+            revenueF = (0:ppaLength)';
+            expensesF = (0:ppaLength)';
+            ppaRateEscF = (0:ppaLength)';
+            
+            % Find ppa from IRR input
+            % Find the index of the smallest arror betwee
+            % ppaOut is the ppa price at irrIn
+            [~,idx] = min(abs(irrCalc-irrIn));
+            ppaF = ppaRates(idx); % PPA Price at irr Input
+            
+            % Calculate IRR with ppa price set at ppa final
+            % Calculations year 1-2
+            
+            ppaRateEscF(1) = 0;
+            ppaRateEscF(2) = ppaF;
+            ppaRateEscF(3) = ppaRateEscF(2)*(1+cpi);
+            revenueF(1) = 0;
+            revenueF(2) = ppaRateEscF(2)*solarConsumption(2) + solarExport(2)*feedInTariff*hh;
+            revenueF(3) = ppaRateEscF(3)*solarConsumption(3) + solarExport(3)*feedInTariff*hh;
+            expensesF(1) = -1*capExpenses;
+            expensesF(2) = ongoingExpEsc + flatExpenses + 0.2*revenueF(2)*cPWC;
+            expensesF(3) = ongoingExpEsc*(1+cpi)^1 + flatExpenses+ 0.2*revenueF(3)*cPWC;
+            
+            % Calculate years 3-end
+            for k = 4:ppaLength+1
+                ppaRateEscF(k) = ppaRateEscF(k-1)*(1+cpi);
+                revenueF(k) = ppaRateEscF(k)*solarConsumption(k) + solarExport(k)*feedInTariff*hh;
+                expensesF(k) = ongoingExpEsc*(1+cpi)^(k-1) + flatExpenses + 0.2*revenueF(k)*cPWC;
+                
+            end
+            
+            % Cashflow
+            cashflowF = revenueF - expensesF;
+            irrF = irr(cashflowF);
+            
+            solarTable.ppa_spend = solarTable.solar_offset*ppaF; % Add PPA rate to solarTable
+            app.solarTableG.Data = solarTable; % Update solarTableG global property
+            
+            
+            % DEMAND CHARGE CALCULATION
+            
+            % Get demand charge rates
+            demandP = app.energyRatesG.Data{3,2};
+            demandS = app.energyRatesG.Data{3,3};
+            demandO = app.energyRatesG.Data{3,4};
+            
+            t = app.energyRatesG.Data{3,5}; % Get rate type type Rate 1,2 or 3
+            
+            % Get demand Threshold
+            try
+                demandT = app.tariffTreeNodeData(9);
+            catch
+                demandT = 0;
+            end
+            
+            try
+                demandTO = app.tariffTreeNodeData(10);
+            catch
+                demandTO = 0;
+            end
+            
+            % Calculate demand charge based on rate type
+            switch t
+                case 1 % Rolling monthly $/kW/month
+                    
+                    % Monthly/Yearly maximums
+                    monthlyData = retime(solarTable(:,8:end),'monthly','max');
+                    % Before Solar demand
+                    monthlyDemand = monthlyData.grid_usage-demandT;
+                    % After Solar demand
+                    monthlyDemandPV = monthlyData.net_gridConsumption-demandT;
+                    
+                    monthlyDemCharge = monthlyDemand.*demandP;
+                    monthlyDemChargePV = monthlyDemandPV.*demandP;
+                    demandCharge = sum(monthlyDemCharge);
+                    demandChargePV = sum(monthlyDemChargePV);
+                    demandSaving = [monthlyDemCharge-monthlyDemChargePV;demandCharge - demandChargePV];
+                    monthName = {'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Total'};
+                    
+                    app.networkName.Value = app.network;
+                    app.tariffName.Value = app.tariff;
+                    app.demandRateType.Value = '$/kVA/month';
+                    
+                    demandCalc = table([monthName'],[monthlyDemCharge;demandCharge],[monthlyDemChargePV;demandChargePV],demandSaving);
+                    
+                    
+                case 2 % Rolling 12-month $/kW/day
+                    
+                    % Monthly/Yearly maximums
+                    monthlyData = retime(solarTable(:,8:end),'monthly','max');
+                    % Before Solar
+                    yearlyDemand = max(monthlyData.grid_usage);
+                    % After Solar
+                    yearlyDemandPV = max(monthlyData.net_gridConsumption);
+                    
+                    demandCharge = yearlyDemand*demandP*365;
+                    demandChargePV = yearlyDemandPV*demandP*365;
+                    demandSaving = demandCharge - demandChargePV;
+                    annual = {'12 Month Rolling'};
+                    
+                    app.networkName.Value = app.network;
+                    app.tariffName.Value = app.tariff;
+                    app.demandRateType.Value = '$/kVA/day';
+                    
+                    demandCalc = table(annual,demandCharge,demandChargePV,demandSaving);
+                    
+                case 3 % TOU demand $/kVA/month
+                    
+                    % Initialise monthly array
+                    monthlyDemand = zeros([12,3]);
+                    monthlyDemandPV = zeros([12,3]);
+                    demandCharge = zeros([12,1]);
+                    demandChargePV = zeros([12,1]);
+                    
+                    % TOU maximums
+                    for i = 1:12
+                        monthlyDemand(i,1) = max(solarTable.grid_usage(solarTable.network_tariff=='Peak' & month(solarTable.Time) == i)) - demandT;
+                        monthlyDemand(i,2) = max(solarTable.grid_usage(solarTable.network_tariff=='Shoulder' & month(solarTable.Time) == i)) - demandT;
+                        monthlyDemand(i,3) = max(solarTable.grid_usage(solarTable.network_tariff=='Off Peak' & month(solarTable.Time) == i)) - demandTO;
+                    end
+                    
+                    for i = 1:12
+                        monthlyDemandPV(i,1) = max(solarTable.net_gridConsumption(solarTable.network_tariff=='Peak' & month(solarTable.Time) == i)) - demandT;
+                        monthlyDemandPV(i,2) = max(solarTable.net_gridConsumption(solarTable.network_tariff=='Shoulder' & month(solarTable.Time) == i)) - demandT;
+                        monthlyDemandPV(i,3) = max(solarTable.net_gridConsumption(solarTable.network_tariff=='Off Peak' & month(solarTable.Time) == i)) - demandTO;
+                    end
+                    
+                    for i = 1:12
+                        demandCharge(i,1) = monthlyDemand(i,1)*demandP + monthlyDemand(i,2)*demandS + monthlyDemand(i,3)*demandO;
+                        demandChargePV(i,1) = monthlyDemandPV(i,1)*demandP + monthlyDemandPV(i,2)*demandS + monthlyDemandPV(i,3)*demandO;
+                    end
+                    
+                    monthName = {'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec','Total'};
+                    
+                    app.networkName.Value = app.network;
+                    app.tariffName.Value = app.tariff;
+                    app.demandRateType.Value = 'TOU $/kVA/month';
+                    
+                    demandSaving = [demandCharge-demandChargePV;sum(demandCharge) - sum(demandChargePV)];
+                    
+                    % Create demand output table
+                    demandCalc = table([monthName'],[demandCharge;sum(demandCharge)],[demandChargePV;sum(demandChargePV)],demandSaving);
+                    
+            end
+            
+            app.demandTableG.Data = demandCalc;
+            
+            % ENERGY BILL BREAKDOWN
+            
+            fixedCost = (app.energyRatesG.Data{1,5}+app.energyRatesG.Data{2,5})*365; % Fixed component of Bill
+            % Row names for table
+            rowNames = {'Retail Vol';'Network Vol';'Misc';'PPA Spend';'Total Bill Variable';'Fixed';'Demand Charge';'Total Bill'};
+            % Sum of variables before solar: Retail Vol, Network Vol, Misc
+            beforeSolar = sum(solarTable{:,14:16});
+            totalBillBeforeVari = sum(beforeSolar);
+            % Total bill before solar Retail Vol, Network Vol,Misc,PPA,Total Variable,Demand,Total,Savings
+            totalBillBefore = sum(beforeSolar) + demandCharge + fixedCost;
+            Before_Solar = [beforeSolar(1:3)';0;totalBillBeforeVari;fixedCost;demandCharge;totalBillBefore];
+            afterSolar = sum(solarTable{:,18:20});
+            ppaSum = sum(solarTable{:,23});  % Sum of PPA spend
+            totalBillAfterVari = sum(afterSolar)+ppaSum;  % Total bill variable part
+            totalBillAfter = sum(afterSolar)+ppaSum+demandChargePV+fixedCost;
+            % After Solar Retail Vol, Network Vol,Misc,PPA,TotalVari,Demand,Total Bill,Savings
+            After_Solar = [afterSolar(1:3)';ppaSum;totalBillAfterVari;fixedCost;demandChargePV;totalBillAfter];
+            billSavings = Before_Solar - After_Solar;
+            billTable = table(rowNames,Before_Solar,After_Solar,billSavings);
+            app.billTableG.Data = billTable;
+            
+            
+            % Global Variable set
+            app.irrOutputG.Data = irrF;
+            app.ppaRateOutG.Data = ppaF;
+            
+            % Dashboard DCF Table
+            dcfCashFlow = [year,systemOutput,solarConsumption,solarExport,ppaRateEscF,revenueF,expensesF,cashflowF];
+            app.dcfCashFlowG.Data = dcfCashFlow;
+            
+            % DCF for EXPORT
+            dcftableExp = zeros([8,ppaLength]);
+            for i = 1:ppaLength
+                dcftableExp(:,i) = [year(i);systemOutput(i);solarConsumption(i);solarExport(i);ppaRateEscF(i);revenueF(i);expensesF(i);cashflowF(i)];
+            end
+            
+            % Export DCF EXPORT
+            app.DCFexport = dcftableExp;
+            
+            
+            % SYSTEM PERFORMANCE
+            % PPA Table System size,Performance,Generation,Consumption, Site after solar, export,Export %,Site red %
+            
+            siteRedp = solar_consumption/site_consumption*100;
+            performance = solar_generation/systemSize;
+            exportp = solar_export/solar_generation*100;
+            margin = app.CapexMarginEditField.Value/100;
+            
+            tariffDisc = (VWAP-ppaF)/VWAP;
+            energySavings = billTable{8,4};
+            commissionS = comms + cPWC*(sum(revenueF)*0.2);
+            
+            % System Output values
+            systemOutValues = round([systemSize;costPVPreSub;subsidy_value;costPV;performance;site_consumption/1000;solar_generation/1000;solar_consumption/1000;solar_export/1000;exportp;siteRedp],4);
+            app.systemOutValuesG.Data = systemOutValues;
+            
+            % PPA OUTPUT values
+            ppaOutValues = round([irrF*100;ppaF;VWAP;tariffDisc*100;energySavings;max(billSavings(5),0);commissionS],4);
+            app.ppaOutValuesG.Data = ppaOutValues;
+        
+            % CAPEX Output Values
+            valueOfSolar = sum(solar_consumption)*VWAP;
+            capCostPVPreSub = costPVPreSub*(1+margin);
+            capCostPV = capCostPVPreSub - subsidy_value;
+            capEnergySavingp = valueOfSolar/totalBillBeforeVari;
+            capROI = valueOfSolar/capCostPV;
+            payBack = 1/capROI;
+            
+            capexOutValues = round([capCostPVPreSub;subsidy_value;capCostPV;VWAP;1-exportp;valueOfSolar;capEnergySavingp;capROI;payBack],4);
+            app.capexOutValuesG.Data = capexOutValues;
+            
+            
+            
+        end
+        
+        %%%% This function calculates the dcf Cashflow, IRR and PPA price
+        
+        function fileP = imptPath(~,search)
+            
+            %This function will import a txt file or spreadsheet
+            fileID = dir(search);
+            if ~isempty(fileID)
+                fileP = fileID.name;
+            else
+                fileP = [];
+            end
+            
+        end
+        
+        function parameters = setDefaultParameters(app)
+            
+            % CONSTANTS Parameters start
+            monitoring = 500;
+            maintenance = app.variablesG(4) * 7;
+            insuranceRate = 0.01;
+            cpi = 0.025;
+            invertReplaceCost = 0.4*app.variablesG(4)*1000/app.variablesG(5);
+            Y1deg = 0.025;
+            Y2deg = 0.007;
+            soilingRate = 0.0;
+            FeedInTariff = 0.08;
+            
+            % Create parameters table
+            names = {'Monitoring';'Maintenance';'Insurance Rate';'CPI';'Inverter Replacement';'Module Degredation 1';'Modules Degredation on';'Soiling Rate';'Feed in Tariff'};
+            values = {monitoring;maintenance;insuranceRate;cpi;invertReplaceCost;Y1deg;Y2deg;soilingRate;FeedInTariff};
+            parameters = [names,values];
+            
+            % Save to global variable
+            app.parametersG.Data = parameters;
+            
+            % For display on dashboard
+            app.UITableParam.Data = parameters;
+            
+        end
+        
+        function touTable = buildTOUtable(~)
+            % This function will import the FULL tou look up array from
+            % the TOU.txt files
+            
+            % Read table with TOU info
+            % Network lookup sheet
+            touTableN = readtable('touN.txt');
+            % Retail lookup sheet
+            touTableR = readtable('touR.txt');
+            
+            % Read Network data from TOU spreadsheet
+            timeSeries = (1:24)';
+            Networks = table2cell(touTableN(1,2:end)); % List of Networks
+            networkLookupWD = table2cell(touTableN(2:25,2:end)); % All Network tou on Weekdays
+            networkLookupWE = table2cell(touTableN(29:52,2:end)); % All Network tou on Weekends
+            
+            % Read retail data from TOu spreadsheet
+            Retailers = table2cell(touTableR(1,2:end)); % List of retailers
+            retailLookupWD = table2cell(touTableR(2:25,2:end)); % All retail tou on weekdays
+            retailLookupWE = table2cell(touTableR(29:52,2:end)); % All retail tou on weekends
+            
+            % Combine all tou DATA into cell array
+            touTable = {'time','Network list','Network Weekday','Network Weekend','Retailer list','Retail Weekday',' Retail Weekend';...
+                timeSeries,Networks,networkLookupWD,networkLookupWE,Retailers,retailLookupWD,retailLookupWE};
+            
+        end
+        
+        function touArray = buildTOUarray(app)
+            
+           
+            
+            touTable = buildTOUtable(app);
+            
+            % Index Network and Retail location
+            t1 = touTable{2,2};
+            t2 = touTable{2,5};
+            idN = strcmp(t1,app.network);
+            idR = strcmp(t2,app.retailer);
+            
+            %Extract the Network TOU vectors
+            NWDTariff = touTable{2,3}(:,idN);
+            NWETariff = touTable{2,4}(:,idN);
+            RWDTariff = touTable{2,6}(:,idR);
+            RWETariff = touTable{2,7}(:,idR);
+            
+            % Create a New TOU lookup table with TOU information
+            timeSeries = (1:24)';
+            touLU = table(timeSeries,NWDTariff,NWETariff,RWDTariff,RWETariff);
+            touArray = repmat(touLU,365,1);
+            
+        end
+        
+        function outTable = buildSolarTable(app)
+            % This function will compare the inverval data with the helioscope data
+            % and output a table showing:
+            
+            % Open the time of use information for each network and retailer
+            touArray = buildTOUarray(app);
+            
+            % Load inputs
+            systemSize = app.variablesG(4);
+            
+            % METER DATA
+            % Read meter data file into the spreadheet
+            % The spreadsheet should have Datestamp and kWH in column 1 and 2 resp.
+            
+            % Get meter data from table or generate meter data
+            app.inputsG{8} = app.meterCheckBox.Value;
+            
+            if ~isempty(app.UITableMeter.Data) && app.meterCheckBox.Value == true
+                rowS = app.rowStart.Value;
+                data = app.UITableMeter.Data;
+                data = data(rowS:end,:);
+                ci = app.timeseriesColumn.Value;
+                cii = app.valueColumn.Value;
+                
+                try
+                    Time = datetime(data{:,ci});
+                    grid_usage = data{:,cii};
+                    
+                    if ~isnumeric(grid_usage)
+                        grid_usage = str2double(grid_usage);
+                    end
+                    
+                    tt = timetable(Time,grid_usage);
+                    intervalT = Time(2) - Time(1);
+                    noMeasures = round(years(1)/intervalT+100,0);
+                    tt(noMeasures:end,:) = [];
+                    
+                    
+                catch
+                    msgbox('Problem with Meter data in file - generating data')
+                    if app.energyUsageM.Value == 0
+                        msgbox('Forget monthly energy usage?')
+                        app.energyUsageM.Value = 20000;
+                        app.LampM.Color = 'Yellow';
+                    end
+                    
+                    dataImptM = generateMData(app);
+                    dateT = datetime([2018,1,1,00,00,00]);
+                    Time = dateT:hours(1):dateT+hours(8759);
+                    grid_usage = dataImptM(:,2);
+                    tt = timetable(Time',grid_usage);
+                    app.LampM.Color = 'Yellow';
+                end
+            else
+                if app.energyUsageM.Value == 0
+                    msgbox('Forget monthly energy usage?')
+                    app.energyUsageM.Value = 50000;
+                    app.LampM.Color = 'Yellow';
+                end
+                
+                dataImptM = generateMData(app);
+                dateT = datetime([2018,1,1,00,00,00]);
+                Time = dateT:hours(1):dateT+hours(8759);
+                grid_usage = dataImptM(:,2);
+                tt = timetable(Time',grid_usage);
+                app.LampM.Color = 'Yellow';
+                
+            end
+            
+            % Retime data to hourly
+            intervalTableM = retime(tt,'hourly','sum');
+            % Clip to 8760 entries
+            intervalTableM(8761:end,:) = [];
+            
+            % Convert all years in meter data to 2018
+            timeArray = datevec(intervalTableM.Time);
+            timeArray(:,1) = 2018;
+            timeArray = datetime(timeArray);
+            
+            %Convert back to timetable
+            intervalTableM.Time = timeArray;
+            intervalTableM = sortrows(intervalTableM);
+            
+            % Interpolate if missing values
+            avDailyS = zeros([24 1]);
+            
+            if height(intervalTableM) < 8759
+                
+                for i = 1:24
+                    meanSolar = intervalTableM.grid_usage(hour(intervalTableM.Time) == i-1);
+                    avDailyS(i) = mean(meanSolar);
+                end
+                
+                avDailyS = smooth(avDailyS);
+                
+                dateT = datetime([2018,1,1,00,00,00]);
+                timeColumn = timetable((dateT:hours(1):dateT+hours(8759))',(1:8760)');
+                msgbox('Missing data - Interpolating data')
+                interData = synchronize(timeColumn,intervalTableM);
+                missingValuesP = nnz(isnan(interData{:,2}))/8760;
+                app.inputsNO.Value = missingValuesP;
+                interData = removevars(interData,1);
+                
+                % Fill missing values
+                iDX = ismissing(interData{:,1}); % Location of missing values
+                iDh = hour(interData.Time(iDX)); % Hourly assignment of each missing value
+                avId = avDailyS(iDh+1); % Find the average value at that hour interval
+                interData{iDX,1} = avId; % Save the average to the missing values
+                intervalTableM = interData;
+                % app.UITableMeter.Data = table(interData.Time,interData.grid_usage);
+                
+            end
+            
+            % HELIOSCOPE DATA
+            % Import helioscope data
+            try
+                dataImptH = readtable(app.HDataPath);
+            catch
+                msgbox('Error getting helioscope')
+            end
+            
+            % Create time vector 1/01/2018 to 1/01/2019 in hourly intervals
+            timeStamp = datetime('2018-01-01 00:00:00') + hours(0:8759)';
+            
+            % Convert helioscope data to timetable
+            % Extract the grid output column
+            try
+                tth = timetable(timeStamp,dataImptH{:,'grid_power'});
+            catch
+                error('Heloiscope data not selected');
+            end
+            tth.Properties.VariableNames = {'solar_output'};
+            tth.solar_output = str2double(tth.solar_output);
+            tth.solar_output(ismissing(tth.solar_output)) = 0;
+            
+            % Combine the Meter data and Helioscope data into timetable
+            sTable = synchronize(intervalTableM,tth);
+            sTable(8760:end,:) = [];
+            % Add a column showing if day is a weekday or weekend
+            sTable.weekday = ~isweekend(sTable.Time);
+            % Convert helioscope output from Watts to kW
+            solarNorm = sTable.solar_output/1000/app.variablesG(3);
+            % Convert helioscope design size
+            sTable.solar_output = solarNorm.*systemSize;
+            
+            % Create matrix array for ease of calculation
+            helio_out = table2array(sTable(:,2));
+            grid_usage = table2array(sTable(:,1));
+            
+            % Calculate net_grid_consumption,grid offset, export
+            net_grid_consumption = max(0,grid_usage-helio_out);
+            offset = min(grid_usage,helio_out);
+            export = max(0,helio_out-offset);
+            
+            % Save an array of solar calculations
+            
+            app.solarArrayG.Data = [grid_usage,helio_out,net_grid_consumption,offset,export];
+            
+            % Add new calculations to sTable
+            sTable.net_gridConsumption = net_grid_consumption;
+            sTable.solar_offset = offset;
+            sTable.solar_export = export;
+            
+            %%% -------------------------
+            
+            %Create Energy Rate Table
+            
+            % Regulatory charges &
+            
+            loses1 = app.energyRatesG.Data{4,3};
+            loses2 = app.energyRatesG.Data{4,4};
+            misc = app.energyRatesG.Data{4,2}*loses2;
+            
+            % Retail rate user inputs
+            rPeak = app.energyRatesG.Data{1,2};
+            rShoulder = app.energyRatesG.Data{1,3};
+            rOffPeak = app.energyRatesG.Data{1,4};
+            rFixed = app.energyRatesG.Data{1,5};
+            % Row vector of rates
+            retailRates = [rPeak;rShoulder;rOffPeak;rFixed];
+            
+            % Network rate user inputs
+            nPeak = app.energyRatesG.Data{2,2}*loses1*loses2;
+            nShoulder = app.energyRatesG.Data{2,3}*loses1*loses2;
+            nOffPeak = app.energyRatesG.Data{2,4}*loses1*loses2;
+            nFixed = app.energyRatesG.Data{2,5};
+            
+            % Row vector of rates
+            networkRates = [nPeak;nShoulder;nOffPeak;nFixed];
+            
+            % Index cell array for TOU rates
+            touI = {'Peak','Shoulder','Off Peak'};
+            
+            % Initialise tariff lists
+            networkTariff = cell(height(sTable),1);
+            retailTariff = cell(height(sTable),1);
+            networkTariffRate = cell(height(sTable),1);
+            retailTariffRate = cell(height(sTable),1);
+            
+            % Create tariff and rate lists
+            for i = 1:height(sTable)
+                % If weekday
+                if sTable.weekday(i) == 1
+                    networkTariff(i) = touArray{i,2};
+                    retailTariff(i) = touArray{i,4};
+                else % If weekend
+                    networkTariff(i) = touArray{i,3};
+                    retailTariff(i) = touArray{i,5};
+                end
+                
+                nIdx = ismember(touI,networkTariff(i));
+                networkTariffRate{i} = networkRates(nIdx);
+                rIdx = ismember(touI,retailTariff(i));
+                retailTariffRate{i} = retailRates(rIdx);
+            end
+            
+            % retailTariff;
+            % Convert rates to numerical
+            networkTariffRate = cell2mat(networkTariffRate);
+            retailTariffRate = cell2mat(retailTariffRate);
+            miscRate = ones(height(sTable),1)*misc;
+            
+            % Convert TOU to categories
+            networkTariff = categorical(networkTariff);
+            retailTariff = categorical(retailTariff);
+            
+            % Add tariff TOU and rate list to solar Table
+            sTable.network_tariff = networkTariff;
+            sTable.retail_tariff = retailTariff;
+            sTable.network_rate = networkTariffRate;
+            sTable.retail_rate = retailTariffRate;
+            sTable.regulatory_rate = miscRate;
+            sTable.variable_rate = networkTariffRate + retailTariffRate + miscRate;
+            
+            % Remove first 2 columns for ease of reading
+            sTable = movevars(sTable,{'grid_usage','solar_output','net_gridConsumption','solar_offset','solar_export'},'After','variable_rate');
+            
+            % Add Solar offset value
+            sTable.value_solar_offset = sTable.solar_offset .* sTable.variable_rate;
+            
+            % Add pre solar Retail spend, Network spend, regulatory spend and total spend
+            sTable.retail_volume_preSolar = sTable.grid_usage .* sTable.retail_rate;
+            sTable.network_volume_preSolar = sTable.grid_usage .* sTable.network_rate;
+            sTable.misc_preSolar = sTable.grid_usage .* sTable.regulatory_rate;
+            sTable.variable_charge_preSolar = sTable.grid_usage .* sTable.variable_rate;
+            
+            % Add post solar Retail spend, Network spend, regulatory spend and total spend
+            sTable.retail_volume_postSolar = sTable.net_gridConsumption .* sTable.retail_rate;
+            sTable.network_volume_postSolar = sTable.net_gridConsumption .* sTable.network_rate;
+            sTable.misc_postSolar = sTable.net_gridConsumption .* sTable.regulatory_rate;
+            sTable.variable_charge_postSolar = sTable.net_gridConsumption .* sTable.variable_rate;
+            
+            % ADD VWAP
+            solar_offset = sum(sTable.solar_offset);
+            sTable.vwap_solar = (sTable.solar_offset/solar_offset).*sTable.variable_rate;
+            outTable = sTable;
+            
+        end
+        
+        %%%% This function creates the Solar Table
+        
+        function mData = generateMData(app)
+            
+            % Import normalised meter data
+            genMeterData = readtable('loadProfile.txt');
+            
+            % Choose load profile
+            profileNo = str2double(app.loadProfileDropDown.Value);
+            profileN = genMeterData{:,profileNo}/100;
+            
+            % Correct data from normalised to whole
+            dailyUsage = app.energyUsageM.Value/30;
+            profile = profileN.*dailyUsage;
+            mTime = (1:24)';
+            mData = [mTime,profile];
+            mData = repmat(mData,[8760/24,1]);
+            ranD = 3.*randn(8760,1);
+            mData(:,2) = mData(:,2).*(1+ranD/100);
+        end
+        
+        %%%% This function generates meter data
+        
+        function graphTables = outPutDisplay(app)
+            
+            % Inputs
+            solarTable = app.solarTableG.Data;
+         
+            
+            %%%% TABLES
+            
+            % DCF 
+            % DCF Table output
+            dcfCashFlow = app.dcfCashFlowG.Data;
+            dcfCashFlowNames = {'Year','System Output','Solar Consumption','Solar Export','PPA Rate','Revenue','Expenses','Cashflow'};
+            
+            app.UITableDCF.Data = dcfCashFlow;
+            app.UITableDCF.ColumnName = dcfCashFlowNames;
+
+            % Solar Table output
+           
+            STvalues = timetable2table(solarTable);
+            STvariableNames = STvalues.Properties.VariableNames;
+            app.UITableSolarTable.Data = STvalues;
+            app.UITableSolarTable.ColumnName = STvariableNames;
+            
+          
+            % Output Energy Bill table to dashboard
+            billTable = app.billTableG.Data;
+            app.UITableEnBill.Data = billTable;
+            
+             % Output Demand Table to dashboard
+            app.demandThreshold.Value = app.energyRatesG.Data{4,4}; % Output Threshold value
+            app.UITableDemand.Data = app.demandTableG.Data; % Ouput Demand Table
+
+           
+               % System Output Dashboard
+            systemPerfNames = {'PV size (kW)';'Gross PV cost';'Subsidy';'Net PV cost';'kWh/kWp';'Total site (MWh)';'PV Gen (MWh)';'PV Consumed (MWh)';'Export (MWh)';'Export %';'Pv offset %'};
+            systemOutValues = app.systemOutValuesG.Data;
+            pvOutputTable = table(systemPerfNames,systemOutValues);
+            app.UITablePVperformance.Data = pvOutputTable;
+            
+            
+            % PPA Output Dashboard
+            ppaOutNames = {'IRR %';'PPA Rate $/kWh';'VWAP $/kWh';'Tariff discount %';'Energy Savings Total %';'Roof Rental @ VWAP';'Commission'};
+            ppaOutValues = app.ppaOutValuesG.Data;
+            ppaOutTable = table(ppaOutNames,ppaOutValues);
+            app.UITablePPAout.Data = ppaOutTable;
+            
+            % CAPEX Output Dashboard
+            capexOutNames = {'Pre-sub cost';'Subsidy Value';'Post-sub cost';'VWAP $/kWh';'Energy Offset %';'Energy Savings $';'Energy savings Variable %';'ROI';'Payback Period'};
+            capexOutValues = app.capexOutValuesG.Data;
+            capexOutTable = table(capexOutNames,capexOutValues);
+            app.UITableCapexOut.Data = capexOutTable;
+            
+            %%%% PLOTS
+            
+            yFit = app.yFitG.Data;
+            ppaRates = yFit(:,1);
+            irrCalc = yFit(:,2);
+            
+            
+            % yFit axis output
+            plot(app.UIAxesYFit,irrCalc,ppaRates);
+            
+            % Daily average axis output
+            avDailySolar = zeros([1 24]); % Initialise
+            avDailyGrid = zeros([1 24]); % Initialise
+            avDailyNetGrid = zeros([1 24]); % Initialise
+            
+            % Solar / Before Solar / After Solar
+            for i = 1:24
+                meanSolar = solarTable.solar_output(hour(solarTable.Time) == i-1); % Solar Generation
+                meanGrid = solarTable.grid_usage(hour(solarTable.Time) == i-1); % Grid Usage
+                meanNetGrid = solarTable.net_gridConsumption(hour(solarTable.Time) == i-1); % New grid consumption
+                avDailySolar(i) = mean(meanSolar);
+                avDailyGrid(i) = mean(meanGrid);
+                avDailyNetGrid(i) = mean(meanNetGrid);
+            end
+            
+            
+            % Plot to UIAxes Daily average
+            dayTime = 0:23;
+            axLP = app.UIAxesLoadProfile;
+            cla(axLP);
+            hold(axLP,'on')
+            plot(axLP,dayTime,avDailySolar);
+            plot(axLP,dayTime,avDailyGrid);
+            plot(axLP,dayTime,avDailyNetGrid);
+            hold(axLP,'off')
+            
+            
+            % Plot daily sum 12 months as 9am-5pm
+            is95 = (hour(solarTable.Time) >= 9 & hour(solarTable.Time) <= 17);
+            axYA = app.UIAxesYear;
+            solarTableYearly = solarTable(is95,8:12);
+            solarTableYearly = retime(solarTableYearly(:,:),'daily','sum');
+            sumUsageDaily = solarTableYearly.grid_usage;
+            sumSolarDaily = solarTableYearly.solar_output;
+            cla(axYA);
+            hold(axYA,'on')
+            bar(axYA,sumUsageDaily);
+            bar(axYA,sumSolarDaily);
+            hold(axLP,'off')
+            
+            % Check and output IRR
+            
+            irrF = app.irrOutputG.Data;
+            irrIn = app.variablesG(1);
+            if irrF <= irrIn+0.01 && irrF >= irrIn - 0.01
+                app.IRRCheckLamp.Color = 'Green';
+                
+            else
+                
+                app.IRRCheckLamp.Color = 'Red';
+                errordlg('Problem with IRR');
+            end
+            
+            graphTables = [];
+        
+        end
+    
+    end
