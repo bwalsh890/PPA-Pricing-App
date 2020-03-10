@@ -1,0 +1,71 @@
+// This app will create pricing for customers in a secure website portal
+
+// 1 - GUI
+// 2 - Calculations
+// 3 - Display output
+// 4 - Print to OneDrive cloud folder
+// 5 - Export data to ledger in Azure
+// 6 - Recover previous calculations
+
+// In the beta version inputs will be limited to 1
+// In the full version up to 50 sites
+
+// CALCULATE THE PPA RATE
+
+// Collect input variables
+siteName, priceClass, pvSize, pvOutput, pvCost, postcode, gridRate = INPUT
+
+// Internal Constants
+CPI = 0.025
+ppaRate = 0.02
+error = 0
+maintenance = pvSize * 15
+insurance = pvCost * 0.003
+
+// initialilse arrays
+returnArray = [0.14,0.12,0.1,0.08]
+classArray = [class1,class2,class3,class4]
+cashflow = []
+ppaRate = []
+error = []
+
+// Match class to target return
+targetIRR = returnArray[priceClass.index(classArray)]
+
+// Find the PPA rate where returnRate = targetIRR
+// Many methods to brute force search for the result that minimises the ERROR
+// Test all PPA rates from 0.01 to 0.31 cents in 0.01 increments
+
+for i:300
+  
+  ppaRate[i] = ppaRate[i-1] + i/1000
+
+    // Build Cashflow over 20 years (PPA TERM)
+      for 1:20
+        revenue = ppaRate[i] * pvOutput
+        expenses = maintenance + insurance
+        cashflow[i] = revenue - expenses
+      end
+
+    // IRR of cashflow - Internal Rate of Return
+    returnRate = numpy.IRR(cashflow[i])
+    
+    error[i] = ABS(returnRate - targetRate)   
+end
+
+// Index the PPA rate that minimises the error
+
+rate = ppaRate[numpy.argmin(error)]
+
+// OUTPUT THE RESULTS TO DASHBOARD
+
+// Display as output
+
+ppaTerm, pvSize, pvOutput, rate
+
+// EXPORT TO PDF
+
+> get file from Ondrive
+> replaceText {{variable}}
+> export to  folder in Onedrive
+
